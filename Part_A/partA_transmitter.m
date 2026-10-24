@@ -1,8 +1,8 @@
 %% Run Part A demonstration and export evidence (base MATLAB only).
-% Keep all companion .m files in this folder.
+% Self-contained script: all helper functions are included below.
 clear; clc; close all;
 outputFolder=fileparts(mfilename('fullpath'));
-addpath(outputFolder);
+% No companion MATLAB files are required.
 tx=transmitter();
 
 %% Test 1: exact noiseless recovery of every payload and complete frame
@@ -93,3 +93,97 @@ fprintf(fid,'No channel, destination combining or link-performance metrics are m
 fclose(fid);
 type(fullfile(outputFolder,'partA_validation.txt'));
 disp(powerTable);
+
+
+function tx = transmitter(cfg)
+% Part A source module. Columns are frames of complex baseband symbols.
+% Format: 16-bit ID (MSB first) | payload | CRC-8 of ID plus payload.
+if nargin==0, cfg=struct(); end
+defaults=struct('seed',16,'numberOfFrames',100,'payloadBitsPerFrame',976, ...
+    'totalEnergyPerFrame',500,'sourceEnergyFraction',0.5);
+names=fieldnames(defaults);
+for k=1:numel(names)
+    if ~isfield(cfg,names{k}), cfg.(names{k})=defaults.(names{k}); end
+end
+validateattributes(cfg.numberOfFrames,{'numeric'},{'scalar','integer','>=',1,'<=',65535});
+validateattributes(cfg.payloadBitsPerFrame,{'numeric'},{'scalar','integer','positive'});
+validateattributes(cfg.sourceEnergyFraction,{'numeric'},{'scalar','>',0,'<',1});
+validateattributes(cfg.totalEnergyPerFrame,{'numeric'},{'scalar','real','finite','positive'});
+assert(mod(cfg.payloadBitsPerFrame,2)==0,'Payload length must be even.');
+previousRng=rng; restoreRng=onCleanup(@()rng(previousRng)); %#ok<NASGU>
+rng(cfg.seed,'twister');
+tx.cfg=cfg; tx.frameIdBits=16; tx.crcBits=8;
+tx.frameBits=16+cfg.payloadBitsPerFrame+8;
+tx.symbolsPerFrame=tx.frameBits/2;
+tx.payloadRows=17:(16+cfg.payloadBitsPerFrame);
+tx.payloadBits=randi([0 1],cfg.payloadBitsPerFrame,cfg.numberOfFrames);
+tx.frameIds=1:cfg.numberOfFrames;
+tx.sourceFrames=zeros(tx.frameBits,cfg.numberOfFrames);
+for k=1:cfg.numberOfFrames
+    id=double(bitget(uint16(k),16:-1:1)).';
+    body=[id;tx.payloadBits(:,k)];
+    tx.sourceFrames(:,k)=[body;crc8_bits(body)];
+end
+tx.sourceSymbols=qpsk_codec(tx.sourceFrames,'map');
+tx.sourceEnergy=cfg.sourceEnergyFraction*cfg.totalEnergyPerFrame;
+tx.relayEnergy=(1-cfg.sourceEnergyFraction)*cfg.totalEnergyPerFrame;
+% Normalized symbol duration Ts=1; energy=sum(abs(symbols).^2).
+tx.sourcePower=tx.sourceEnergy/tx.symbolsPerFrame;
+tx.relayPower=tx.relayEnergy/tx.symbolsPerFrame;
+tx.sourceTx=sqrt(tx.sourcePower)*tx.sourceSymbols;
+tx.sourceTwoPhase=[tx.sourceTx;zeros(size(tx.sourceTx))];
+end
+
+
+function relay=relay_decode_forward(equalizedSymbols,tx)
+% Part A relay strategy. Input: coherent equalized symbol columns.
+% Source amplitude scaling may remain; phase rotation must be corrected.
+% Output is already scaled by relay power. No propagation model is included.
+assert(isequal(size(equalizedSymbols),size(tx.sourceTx)));
+assert(all(isfinite(equalizedSymbols),'all'));
+relay.detectedFrames=qpsk_codec(equalizedSymbols,'demap');
+relay.forward=false(1,size(equalizedSymbols,2));
+relay.relayTx=zeros(size(equalizedSymbols));
+for k=1:size(equalizedSymbols,2)
+    frame=relay.detectedFrames(:,k);
+    relay.forward(k)=isequal(crc8_bits(frame(1:end-8)),frame(end-7:end));
+    if relay.forward(k)
+        relay.relayTx(:,k)=sqrt(tx.relayPower)*qpsk_codec(frame,'map');
+    end
+end
+relay.payloadBits=relay.detectedFrames(tx.payloadRows,:);
+relay.relayTwoPhase=[zeros(size(relay.relayTx));relay.relayTx];
+end
+
+
+function out=qpsk_codec(in,mode)
+% Shared mapping: 00 -> (1+j)/sqrt(2); 01 -> (1-j)/sqrt(2);
+% 10 -> (-1+j)/sqrt(2); 11 -> (-1-j)/sqrt(2).
+switch mode
+    case 'map'
+        assert(mod(size(in,1),2)==0 && all(in==0 | in==1,'all'));
+        out=((1-2*in(1:2:end,:))+1j*(1-2*in(2:2:end,:)))/sqrt(2);
+    case 'demap'
+        out=zeros(2*size(in,1),size(in,2));
+        out(1:2:end,:)=real(in)<0;
+        out(2:2:end,:)=imag(in)<0;
+    otherwise
+        error('Mode must be map or demap.');
+end
+end
+
+
+function remainder=crc8_bits(bits)
+% MSB-first division, g(x)=x^8+x^2+x+1 (0x07).
+% Initial state zero, no reflection, no final XOR; append eight zeros.
+bits=double(bits(:));
+assert(all(bits==0 | bits==1),'CRC input must be binary.');
+work=[bits;zeros(8,1)]; generator=[1 0 0 0 0 0 1 1 1]';
+for i=1:numel(bits)
+    if work(i)==1
+        work(i:i+8)=mod(work(i:i+8)+generator,2);
+    end
+end
+remainder=work(end-7:end);
+end
+
