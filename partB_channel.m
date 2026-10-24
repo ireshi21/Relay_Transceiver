@@ -119,6 +119,56 @@ end
 assert(all(isfinite(rxSR(:))) && all(isfinite(rxSD(:))));
 assert(all(abs(N0-EsReference./(2*10.^(cfg.EbN0dB/10)))<1e-12));
 
+%% Empirical channel validation from the actual saved realizations
+% Recover AWGN by subtracting the known transmitted component. These are
+% checks on generated samples, not new random draws or analytical repeats.
+noisePowerSD=zeros(1,nSNR);
+noisePowerSR=zeros(nPos,nSNR);
+noisePowerRD=zeros(nPos,nSNR);
+noiseRealSD=zeros(1,nSNR);
+noiseImagSD=zeros(1,nSNR);
+for k=1:nSNR
+    cleanSD=tx.sourceTx .* (sqrt(gainSD)*hSD(:,k).');
+    residualSD=rxSD(:,:,k)-cleanSD;
+    noisePowerSD(k)=mean(abs(residualSD(:)).^2);
+    noiseRealSD(k)=mean(real(residualSD(:)).^2);
+    noiseImagSD(k)=mean(imag(residualSD(:)).^2);
+    for p=1:nPos
+        cleanSR=tx.sourceTx .* (sqrt(gainSR(p))*hSR(:,k,p).');
+        residualSR=rxSR(:,:,k,p)-cleanSR;
+        noisePowerSR(p,k)=mean(abs(residualSR(:)).^2);
+        noisePowerRD(p,k)=mean(abs(noiseRD(:,:,k,p)).^2,'all');
+    end
+end
+relativeNoiseError=max(abs([noisePowerSD;noisePowerSR;noisePowerRD] ...
+    -repmat(N0,1+2*nPos,1))./repmat(N0,1+2*nPos,1),[],'all');
+relativeQuadratureError=max(abs([noiseRealSD;noiseImagSD] ...
+    -repmat(N0/2,2,1))./repmat(N0/2,2,1),[],'all');
+% There are nFrames*nSymbols complex samples for each link/SNR estimate.
+% A 5%% tolerance is deliberately wider than ordinary sampling variation.
+assert(relativeNoiseError<0.05 && relativeQuadratureError<0.05, ...
+    'Measured AWGN power disagrees with the configured N0.');
+
+meanFadingPower=[mean(abs(hSD(:)).^2),mean(abs(hSR(:)).^2), ...
+    mean(abs(hRD(:)).^2)];
+% For unit-power Rayleigh fading E{|h|^2}=1. Each link class contains at
+% least nFrames*nSNR independent draws, so allow 15%% sampling tolerance.
+assert(all(abs(meanFadingPower-1)<0.15), ...
+    'Measured fading power disagrees with unit-power Rayleigh scaling.');
+maxCrossCorrelation=0;
+for p=1:nPos
+    sd=hSD(:); sr=reshape(hSR(:,:,p),[],1); rd=reshape(hRD(:,:,p),[],1);
+    pairs={[sd sr],[sd rd],[sr rd]};
+    for j=1:numel(pairs)
+        pair=pairs{j};
+        correlation=abs(sum(conj(pair(:,1)).*pair(:,2)))/ ...
+            sqrt(sum(abs(pair(:,1)).^2)*sum(abs(pair(:,2)).^2));
+        maxCrossCorrelation=max(maxCrossCorrelation,correlation);
+    end
+end
+assert(maxCrossCorrelation<0.15, ...
+    'Sample cross-correlation between fading links is unexpectedly high.');
+
 %% Part B evidence plots
 figure('Color','w');
 plot(cfg.relayPositionsM,PL_SR_dB,'o-','LineWidth',1.6); hold on;
@@ -170,6 +220,16 @@ fprintf(fid,'Direct path loss %.2f dB, normalized direct power gain 1.\n',PL_SD_
 fprintf(fid,'Independent block Rayleigh links and AWGN; seed %d.\n',cfg.seed);
 fprintf(fid,'Nominal direct-reference Eb/N0: %s dB.\n',mat2str(cfg.EbN0dB));
 fprintf(fid,'Noise N0 = (full-budget symbol energy / 2) / nominal Eb/N0.\n');
+fprintf(fid,'Maximum measured AWGN power error across links/SNR: %.2f%% (limit 5%%).\n', ...
+    100*relativeNoiseError);
+fprintf(fid,'Maximum measured S-D I/Q variance error: %.2f%% (limit 5%%).\n', ...
+    100*relativeQuadratureError);
+fprintf(fid,'Mean fading powers [S-D S-R R-D]: [%.3f %.3f %.3f] (target 1).\n', ...
+    meanFadingPower);
+fprintf(fid,'Maximum normalized fading-link cross-correlation: %.3f (limit 0.15).\n', ...
+    maxCrossCorrelation);
+fprintf(fid,'Fading statistics are sampled over %d independent frame/SNR draws per link.\n', ...
+    nFrames*nSNR);
 fprintf(fid,'Direct baseline spends full frame energy in one time slot.\n');
 fprintf(fid,'Relay-phase received symbols await Part C CRC forwarding.\n');
 fprintf(fid,'No BER, PER, outage, throughput or optimum placement is claimed here.\n');
