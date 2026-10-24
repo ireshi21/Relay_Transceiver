@@ -1,0 +1,9 @@
+PART A FUNCTIONAL VALIDATION
+Frame: 16 ID + 976 payload + 8 CRC = 1000 bits; 500 QPSK symbols.
+Ideal test: 0 payload errors across 97600 bits; 100/100 CRC pass.
+Entire frames and forwarded frames recovered exactly.
+Separate CRC test: one injected bit error; frame 1 rejected; 99 other frames forwarded.
+Default energy: 250 source + 250 relay = 500 per attempted frame.
+CRC rejection uses 250 units; 250 units remain unused.
+25/75, 50/50 and 75/25 energy splits passed per-frame budget checks.
+No channel, destination combining or link-performance metrics are modeled.
