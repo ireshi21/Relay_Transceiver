@@ -39,6 +39,10 @@ BER_coop=zeros(nPos,nSNR);
 PER_coop=zeros(nPos,nSNR);
 OUT_coop=zeros(nPos,nSNR);
 TH_coop=zeros(nPos,nSNR);
+BER_relay=zeros(nPos,nSNR); % erasures count as all payload bits lost
+PER_relay=zeros(nPos,nSNR);
+OUT_relay=zeros(nPos,nSNR);
+TH_relay=zeros(nPos,nSNR);
 relayForwardRate=zeros(nPos,nSNR);
 CRCfail_direct=zeros(1,nSNR);
 CRCfail_coop=zeros(nPos,nSNR);
@@ -81,6 +85,8 @@ for p=1:nPos
     for k=1:nSNR
         bitErrors=0; packetErrors=0; outages=0; successes=0;
         forwards=0; relayFailures=0; crcFailures=0; undetected=0;
+        relayBitErrors=0; relayPacketErrors=0;
+        relayOutages=0; relaySuccesses=0;
         for f=1:nFrames
             truth=tx.sourceFrames(:,f);
             aSR=sqrt(B.gainSR(p)*tx.sourcePower)*B.hSR(f,k,p);
@@ -96,6 +102,14 @@ for p=1:nPos
                 aRD=sqrt(B.gainRD(p)*tx.relayPower)*B.hRD(f,k,p);
                 yRD=sqrt(B.gainRD(p))*B.hRD(f,k,p)*relayTx + ...
                     B.noiseRD(:,f,k,p);
+                relayDecoded=qpsk_demap_c(yRD/aRD);
+                relayBad=any(relayDecoded~=truth);
+                relayCRC=crc_ok_c(relayDecoded);
+                relayBitErrors=relayBitErrors+nnz( ...
+                    relayDecoded(tx.payloadRows)~=tx.payloadBits(:,f));
+                relayPacketErrors=relayPacketErrors+relayBad;
+                relaySuccesses=relaySuccesses+(relayCRC && ~relayBad);
+                relayOutages=relayOutages+(abs(aRD)^2/B.N0(k)<outageThreshold);
                 % Equal-noise-variance MRC; use both observations of the
                 % same QPSK frame. A rare undetected relay CRC error is
                 % tracked rather than assumed impossible.
@@ -104,6 +118,11 @@ for p=1:nPos
                 effectiveSNR=(abs(aSD)^2+abs(aRD)^2)/B.N0(k);
             else
                 % Relay is silent: do not combine R-D receiver noise.
+                % Relay-only reception has a full-frame erasure. Count all
+                % payload bits as lost in its erasure-inclusive BER.
+                relayBitErrors=relayBitErrors+nPayload;
+                relayPacketErrors=relayPacketErrors+1;
+                relayOutages=relayOutages+1;
                 combined=ySD/aSD;
                 effectiveSNR=abs(aSD)^2/B.N0(k);
             end
@@ -123,6 +142,10 @@ for p=1:nPos
         % Both time slots are reserved per cooperative attempt, including
         % a silent relay. Each time slot contains nSym symbol periods.
         TH_coop(p,k)=successes*nPayload/(nFrames*2*nSym);
+        BER_relay(p,k)=relayBitErrors/(nFrames*nPayload);
+        PER_relay(p,k)=relayPacketErrors/nFrames;
+        OUT_relay(p,k)=relayOutages/nFrames;
+        TH_relay(p,k)=relaySuccesses*nPayload/(nFrames*2*nSym);
         relayForwardRate(p,k)=forwards/nFrames;
         relayCRCfail(p,k)=relayFailures/nFrames;
         CRCfail_coop(p,k)=crcFailures/nFrames;
@@ -132,6 +155,10 @@ end
 
 assert(all(BER_direct>=0 & BER_direct<=1));
 assert(all(BER_coop(:)>=0 & BER_coop(:)<=1));
+assert(all(BER_relay(:)>=0 & BER_relay(:)<=1));
+assert(all(PER_relay(:)>=0 & PER_relay(:)<=1));
+assert(all(OUT_relay(:)>=0 & OUT_relay(:)<=1));
+assert(all(TH_relay(:)<=nPayload/(2*nSym)+1e-12));
 assert(all(TH_direct<=nPayload/nSym+1e-12));
 assert(all(TH_coop(:)<=nPayload/(2*nSym)+1e-12));
 assert(all(abs(relayForwardRate(:)+relayCRCfail(:)-1)<1e-12));
@@ -151,6 +178,14 @@ for k=1:nSNR
     for p=1:nPos
         PositionM(end+1,1)=positions(p); %#ok<SAGROW>
         NominalEbN0dB(end+1,1)=EbN0dB(k); %#ok<SAGROW>
+        Mode{end+1,1}='Relay-only'; %#ok<SAGROW>
+        BER(end+1,1)=BER_relay(p,k); %#ok<SAGROW>
+        PER(end+1,1)=PER_relay(p,k); %#ok<SAGROW>
+        Outage(end+1,1)=OUT_relay(p,k); %#ok<SAGROW>
+        UsefulBitsPerSymbolPeriod(end+1,1)=TH_relay(p,k); %#ok<SAGROW>
+        RelayForwardRate(end+1,1)=relayForwardRate(p,k); %#ok<SAGROW>
+        PositionM(end+1,1)=positions(p); %#ok<SAGROW>
+        NominalEbN0dB(end+1,1)=EbN0dB(k); %#ok<SAGROW>
         Mode{end+1,1}='Cooperative'; %#ok<SAGROW>
         BER(end+1,1)=BER_coop(p,k); %#ok<SAGROW>
         PER(end+1,1)=PER_coop(p,k); %#ok<SAGROW>
@@ -165,6 +200,7 @@ writetable(results,fullfile(outputFolder,'partC_results.csv'));
 save(fullfile(outputFolder,'partC_data.mat'),'EbN0dB','positions', ...
     'outageThresholdDB','BER_direct','PER_direct','OUT_direct', ...
     'TH_direct','BER_coop','PER_coop','OUT_coop','TH_coop', ...
+    'BER_relay','PER_relay','OUT_relay','TH_relay', ...
     'relayForwardRate','CRCfail_direct','CRCfail_coop', ...
     'relayCRCfail','undetected_direct','undetected_coop','results');
 
@@ -237,6 +273,37 @@ legend(arrayfun(@(x)sprintf('%g m',x),positions, ...
 exportgraphics(gcf,fullfile(outputFolder,'partC_relay_forwarding.png'), ...
     'Resolution',200);
 
+%% Separate three-mode comparison at the middle relay position
+% Relay-only BER includes all bits of a non-forwarded frame as an erasure.
+% PER and outage likewise count relay silence as failure; both relay modes
+% reserve two slots. The direct mode uses one slot and the same energy cap.
+[~,pMid]=min(abs(positions-50));
+figure('Color','w');
+subplot(2,2,1);
+semilogy(EbN0dB,max(BER_direct,berFloor),'k-o', ...
+    EbN0dB,max(BER_relay(pMid,:),berFloor),'r-s', ...
+    EbN0dB,max(BER_coop(pMid,:),berFloor),'b-^','LineWidth',1.3);
+grid on; ylabel('BER (relay erasures count as lost bits)');
+title('Payload errors');
+subplot(2,2,2);
+plot(EbN0dB,PER_direct,'k-o',EbN0dB,PER_relay(pMid,:),'r-s', ...
+    EbN0dB,PER_coop(pMid,:),'b-^','LineWidth',1.3);
+grid on; ylim([0 1]); ylabel('PER'); title('Packet errors');
+subplot(2,2,3);
+plot(EbN0dB,OUT_direct,'k-o',EbN0dB,OUT_relay(pMid,:),'r-s', ...
+    EbN0dB,OUT_coop(pMid,:),'b-^','LineWidth',1.3);
+grid on; ylim([0 1]); xlabel('Nominal E_b/N_0 (dB)');
+ylabel('Outage'); title('5 dB symbol-SNR outage');
+subplot(2,2,4);
+plot(EbN0dB,TH_direct,'k-o',EbN0dB,TH_relay(pMid,:),'r-s', ...
+    EbN0dB,TH_coop(pMid,:),'b-^','LineWidth',1.3);
+grid on; xlabel('Nominal E_b/N_0 (dB)');
+ylabel('Payload bits per symbol period'); title('Effective throughput');
+legend('Direct','Relay-only','Combined','Location','best');
+sgtitle(sprintf('Three reception modes, relay at %g m',positions(pMid)));
+exportgraphics(gcf,fullfile(outputFolder,'partC_three_modes.png'), ...
+    'Resolution',200);
+
 fprintf('PART C COMPLETE: %d frames x %d Eb/N0 values x %d positions.\n', ...
     nFrames,nSNR,nPos);
 fprintf('Outage threshold: %g dB instantaneous symbol SNR.\n', ...
@@ -250,6 +317,7 @@ for p=1:nPos
         TH_coop(p,end),relayForwardRate(p,end));
 end
 fprintf('Numerical results: partC_results.csv; plots: partC_*.png\n');
+fprintf('Relay-only mode: silent frames count as erasures; BER counts their payload bits as lost.\n');
 
 function bits=qpsk_demap_c(symbols)
 bits=zeros(2*numel(symbols),1);
